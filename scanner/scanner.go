@@ -16,7 +16,7 @@ import (
 )
 
 // ============================================================
-// ASTRA AV Engine — Episode 1: Hash-Based Detection
+// ASTRA AV Engine — Episode 2: YARA Rule Scanning
 // scanner/scanner.go — Core scanning logic
 // ============================================================
 
@@ -31,17 +31,23 @@ const (
 
 // ScanResult holds the full result of scanning a single file.
 type ScanResult struct {
-	FilePath   string
-	MD5        string
-	SHA1       string
-	SHA256     string
+	FilePath string
+	MD5      string
+	SHA1     string
+	SHA256   string
+
+	// Hash detection fields
 	Detected   bool
 	MatchType  string // e.g. "SHA256", "MD5", "SHA1"
 	MatchHash  string // the specific hash that matched
 	ThreatName string
-	Verdict    Verdict
-	ScanTime   time.Duration
-	Error      error
+
+	// YARA detection fields
+	YaraMatches []YaraMatch
+
+	Verdict  Verdict
+	ScanTime time.Duration
+	Error    error
 }
 
 // Signature represents a single entry in the hash database.
@@ -151,14 +157,17 @@ func hashHex(h hash.Hash) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// ScanFile scans a single file against the signature database.
-func ScanFile(path string, db *SignatureDB) ScanResult {
+// ScanFile scans a single file against the hash signature database and,
+// optionally, a compiled YARA ruleset. Pass nil for ys to skip YARA scanning.
+func ScanFile(path string, db *SignatureDB, ys *YaraScanner) ScanResult {
 	start := time.Now()
+
 	result := ScanResult{
 		FilePath: path,
 		Verdict:  VerdictClean,
 	}
 
+	// ── Hash-based detection ─────────────────────────────
 	md5sum, sha1sum, sha256sum, err := hashFile(path)
 	if err != nil {
 		result.Error = err
@@ -190,12 +199,24 @@ func ScanFile(path string, db *SignatureDB) ScanResult {
 		}
 	}
 
+	// ── YARA scanning ────────────────────────────────────
+	if ys != nil {
+		yaraMatches, err := ys.ScanFileYara(path)
+		if err != nil {
+			// Non-fatal: log the error but don't abort the whole scan
+			fmt.Fprintf(os.Stderr, "[WARN] YARA scan error on %s: %v\n", path, err)
+		} else if len(yaraMatches) > 0 {
+			result.YaraMatches = yaraMatches
+			result.Verdict = VerdictMalicious
+		}
+	}
+
 	result.ScanTime = time.Since(start)
 	return result
 }
 
 // ScanDirectory recursively scans all files in a directory.
-func ScanDirectory(root string, db *SignatureDB) []ScanResult {
+func ScanDirectory(root string, db *SignatureDB, ys *YaraScanner) []ScanResult {
 	var results []ScanResult
 
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -210,7 +231,7 @@ func ScanDirectory(root string, db *SignatureDB) []ScanResult {
 		if info.IsDir() {
 			return nil
 		}
-		results = append(results, ScanFile(path, db))
+		results = append(results, ScanFile(path, db, ys))
 		return nil
 	})
 
